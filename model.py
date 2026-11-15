@@ -92,3 +92,75 @@ class FeedForwardBlock(nn.Module):
         # read it inside out: linear_1 -> relu (negatives become 0) -> dropout -> linear_2
         return self.linear_2(self.dropout(torch.relu(self.linear_1(x))))
 
+class MultiHeadAttentionBlock (nn.Module):
+    # Step 4: "the meeting". Every token gathers information from the tokens that matter to it.
+    # Each token makes a Query (what am I looking for?), a Key (what do I contain?)
+    # and a Value (what do I hand over?). h heads do this side by side, each on its own slice.
+    # The same class is used for encoder self-attention, decoder self-attention and cross-attention;
+    # only the q, k, v and mask you pass in change.
+
+    def __init__(self, d_model: int, h: int, dropout: float) -> None:
+        super().__init__()
+        self.d_model = d_model
+        self.h = h                      # number of heads
+        # the d_model numbers get cut into h equal slices, so it has to divide evenly
+        assert d_model % h == 0, " d_model is not divisible by h"
+
+        self.d_k = d_model // h         # numbers per head (512 // 8 = 64)
+        self.w_q = nn.Linear(d_model, d_model) # Wq: makes the Queries
+        self.w_k = nn.Linear(d_model, d_model) # Wk: makes the Keys
+        self.w_v = nn.Linear(d_model, d_model) # Wv: makes the Values
+
+        self.w_o = nn.Linear(d_model, d_model) # Wo: mixes the heads' results back together
+        self.dropout = nn.Dropout(dropout)
+
+    # staticmethod = doesn't use self, so it's called as MultiHeadAttentionBlock.attention(...)
+    @staticmethod
+    def attention (query, key, value, mask, dropout: nn.Dropout):
+        d_k = query.shape[-1]
+
+        # 1. score: compare every Query with every Key (dot product)   2. scale by sqrt(d_k)
+        # (Batch, h, seq_len, d_k) @ (Batch, h, d_k, seq_len) --> (Batch, h, seq_len, seq_len)
+        # (in cross-attention the two seq_lens can differ: target length x source length)
+        attention_scores = (query @ key.transpose (-2, -1)) / math.sqrt(d_k)
+        if mask is not None:
+            # where mask is 0 (padding, or future words in the decoder) write a huge negative
+            # number, so softmax turns it into ~0% attention
+            attention_scores.masked_fill_(mask == 0, -1e9)
+        # 3. softmax: each row becomes percentages that add up to 1
+        attention_scores = attention_scores.softmax(dim = -1) # (Batch, h, seq_len, seq_len)
+
+        if dropout is not None:
+            attention_scores = dropout(attention_scores)
+
+        # 4. blend: mix the Values using those percentages
+        # (Batch, h, seq_len, seq_len) @ (Batch, h, seq_len, d_k) --> (Batch, h, seq_len, d_k)
+        # also return the scores themselves, so we can look at / plot them later
+        return(attention_scores @ value), attention_scores
+
+
+    def forward (self, q, k, v, mask):
+        # q, k, v: (Batch, Seq_len, d_model). In self-attention all three are the same x;
+        # in the decoder's cross-attention, k and v are the encoder output.
+        query = self.w_q(q) # (Batch, Seq_len, d_model) --> (Batch, seq_len, d_model)
+        key = self.w_k(k)   # (Batch, Seq_len, d_model) --> (Batch, seq_len, d_model)
+        value = self.w_v(v)    # (Batch, Seq_len, d_model) --> (Batch, seq_len, d_model)
+
+        # cut into h heads:
+        # (Batch, seq_len, d_model) ---> (Batch, seq_len, h, d_k) --> (Batch, h, seq_len, d_k)
+        # .view reshapes without changing numbers; .transpose(1, 2) puts heads before tokens
+        query = query.view(query.shape[0], query.shape[1], self.h, self.d_k).transpose(1, 2)
+        key = key.view (key.shape[0], key.shape[1], self.h, self.d_k).transpose(1, 2)
+        value = value.view(value.shape[0], value.shape[1], self.h, self.d_k).transpose(1, 2)
+
+        x, self.attention_scores = MultiHeadAttentionBlock.attention(query, key, value, mask, self.dropout)
+
+        # glue the heads back together:
+        # (Batch, h, seq_len, d_k) --> (Batch, seq_len, h, d_k) --> (Batch, seq_len, d_model)
+        # .contiguous() re-lays the numbers in memory after transpose so .view works;
+        # -1 means "work this size out yourself"
+        x= x.transpose(1,2).contiguous().view(x.shape[0], -1, self.h * self.d_k)
+
+        # mix what the heads found: (Batch, seq_len, d_model) --> (Batch, seq_len, d_model)
+        return self.w_o(x)
+
