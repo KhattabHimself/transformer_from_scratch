@@ -260,3 +260,100 @@ class Decoder(nn.Module):
             x= layer (x, encoder_output, src_mask, tgt_mask)
         return self.norm(x)
 
+class ProjectionLayer (nn.Module):
+    # Step 11: turn each decoder output vector (d_model numbers) into a score for
+    # every word in the target vocabulary, i.e. "which word comes next?"
+
+    def __init__(self, d_model: int, vocab_size: int)-> None:
+        super().__init__()
+        self.proj = nn.Linear(d_model, vocab_size)  # 512 --> one score per word
+
+    def forward (self, x):
+        # (Batch, Seq_len, d_model) --> (Batch, Seq_len, vocab_size)
+        # log_softmax = log of the probabilities (numerically safer than plain softmax);
+        # the highest one is still the most likely next word
+        return torch.log_softmax(self.proj(x), dim = -1)
+
+class Transformer(nn.Module):
+    # Step 12: holds every piece. Instead of one forward() it has 3 methods, so that when
+    # translating you can run the encoder ONCE and then the decoder many times
+    # (one new word per step).
+
+    def __init__(self, encoder: Encoder, decoder: Decoder, src_embed: InputEmbeddings, tgt_embed: InputEmbeddings, src_pos: PositionalEncoding, tgt_pos: PositionalEncoding, projection_layer: ProjectionLayer):
+        super().__init__()
+        self.encoder = encoder
+        self.decoder = decoder
+        self.src_embed = src_embed          # source language: IDs --> vectors
+        self.tgt_embed = tgt_embed          # target language: IDs --> vectors
+        self.src_pos = src_pos
+        self.tgt_pos = tgt_pos
+        self.projection_layer= projection_layer
+
+    def encode (self, src, src_mask):
+        # source token IDs (Batch, src_seq_len) --> embeddings --> + positions --> encoder
+        src = self.src_embed(src)
+        src = self.src_pos(src)
+        return self.encoder(src, src_mask)      # (Batch, src_seq_len, d_model)
+
+    def decode (self, encoder_output, src_mask, tgt, tgt_mask):
+        # target token IDs (Batch, tgt_seq_len) --> embeddings --> + positions --> decoder
+        tgt = self.tgt_embed(tgt)
+        tgt = self.tgt_pos(tgt)
+        return self.decoder(tgt, encoder_output, src_mask, tgt_mask)    # (Batch, tgt_seq_len, d_model)
+
+    def project (self, x):
+        # (Batch, tgt_seq_len, d_model) --> (Batch, tgt_seq_len, tgt_vocab_size)
+        return self.projection_layer(x)
+
+
+def build_transformer(src_vocab_size: int, tgt_vocab_size: int, src_seq_len: int, tgt_seq_len: int, d_model: int = 512, N: int = 6, h: int =8, dropout: float= 0.1, d_ff: int = 2048) -> Transformer:
+    # Step 13: the "factory". Creates every layer with the right sizes and wires them together.
+    # It's a plain function at the top level (not inside a class), so other files can do:
+    #     from model import build_transformer
+    # The default sizes are the ones from the paper.
+
+    # create the embedding layers (source and target languages have different vocabularies)
+    src_embed = InputEmbeddings(d_model, src_vocab_size)
+    tgt_embed = InputEmbeddings(d_model, tgt_vocab_size)
+
+    # create the positional encoding layers
+    src_pos = PositionalEncoding(d_model, src_seq_len, dropout)
+    tgt_pos = PositionalEncoding(d_model, tgt_seq_len, dropout)
+
+    # create N encoder blocks. New blocks on every loop pass, so each layer learns its own weights
+    encoder_blocks = []
+    for _ in range (N):
+        encoder_self_attention_block = MultiHeadAttentionBlock(d_model, h, dropout)
+        feed_forward_block = FeedForwardBlock(d_model, d_ff, dropout)
+        encoder_block = EncoderBlock(encoder_self_attention_block, feed_forward_block, dropout)
+        encoder_blocks.append(encoder_block)
+
+    # create N decoder blocks: each has self-attention, cross-attention and feed-forward
+    decoder_blocks= []
+    for _ in range (N):
+        decoder_self_attention_block = MultiHeadAttentionBlock (d_model, h, dropout)
+        decoder_cross_attention_block = MultiHeadAttentionBlock(d_model, h, dropout)
+        feed_forward_block = FeedForwardBlock(d_model, d_ff, dropout)
+        decoder_block = DecoderBlock(decoder_self_attention_block, decoder_cross_attention_block, feed_forward_block, dropout)
+        decoder_blocks.append((decoder_block))
+
+    # create the encoder and the decoder. nn.ModuleList (not a plain Python list)
+    # so PyTorch can find, train, move and save every block
+    encoder = Encoder(nn.ModuleList(encoder_blocks))
+    decoder = Decoder(nn.ModuleList(decoder_blocks))
+
+    # create the projection layer: d_model --> target vocabulary
+    projection_layer = ProjectionLayer(d_model, tgt_vocab_size)
+
+    # create the transformer
+    transformer = Transformer(encoder, decoder, src_embed, tgt_embed, src_pos, tgt_pos, projection_layer)
+
+    # initialize the parameters. Xavier picks random starting values scaled to each layer's
+    # size, so signals neither explode nor fade at the start of training.
+    # p.dim() > 1 = only weight matrices and embedding tables (skip biases and LayerNorm's alpha/bias).
+    # The _ at the end of xavier_uniform_ means "change p in place".
+    for p in transformer.parameters():
+        if p.dim()> 1:
+            nn.init.xavier_uniform_(p)
+
+    return transformer
