@@ -1,0 +1,10 @@
+__pycache__/
+.ipynb_checkpoints/
+.vscode/
+
+# created when you train
+weights/
+runs/
+wandb/
+tokenizer_*.json
+*.pt
