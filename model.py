@@ -59,3 +59,36 @@ class PositionalEncoding(nn.Module):
         x = x+ (self.pe[:, :x.shape[1]]).requires_grad_(False)
         return self.dropout(x)
 
+class LayerNormalization(nn.Module):
+    # Step 5: for each token, rescale its d_model numbers to average 0 and spread 1,
+    # so values don't blow up or shrink as they pass through many layers.
+
+    def __init__( self, eps: float= 10**-6 ):
+        super().__init__()
+        self.eps= eps                               # tiny number so we never divide by 0
+        self.alpha= nn.Parameter(torch.ones(1))     # learned scale: multiplied
+        self.bias= nn.Parameter(torch.zeros(1))     # learned shift: added
+
+    def forward(self, x):
+        # x: (Batch, Seq_len, d_model)
+        # dim=-1: work along the last axis (one token's d_model numbers)
+        # keepdim=True: result is (Batch, Seq_len, 1) so it lines up with x for the subtraction
+        mean= x.mean(dim= -1, keepdim= True)
+        std = x.std(dim= -1, keepdim = True)
+        return self.alpha * (x - mean) / (std + self.eps) + self.bias
+
+class FeedForwardBlock(nn.Module):
+    # Step 6: "desk time". Each token is processed on its own (no looking at other tokens):
+    # expand to d_ff, ReLU, dropout, squeeze back to d_model.
+
+    def __init__(self, d_model: int, d_ff: int, dropout: float)-> None:
+        super().__init__()
+        self.linear_1 = nn.Linear(d_model, d_ff) # W1 and b1: 512 --> 2048 (expand)
+        self.dropout = nn.Dropout(dropout)
+        self.linear_2 = nn.Linear(d_ff, d_model) # W2 and b2: 2048 --> 512 (squeeze back)
+
+    def forward(self, x):
+        # (Batch, Seq_len, d_model) --> (Batch, Seq_len, d_ff) --> (Batch, Seq_len, d_model)
+        # read it inside out: linear_1 -> relu (negatives become 0) -> dropout -> linear_2
+        return self.linear_2(self.dropout(torch.relu(self.linear_1(x))))
+
