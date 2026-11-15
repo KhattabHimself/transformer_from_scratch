@@ -164,3 +164,54 @@ class MultiHeadAttentionBlock (nn.Module):
         # mix what the heads found: (Batch, seq_len, d_model) --> (Batch, seq_len, d_model)
         return self.w_o(x)
 
+class ResidualConnection(nn.Module):
+    # Step 5: "add, don't replace". Output = x + change, where the change comes from a
+    # sublayer (attention or feed-forward). Keeps the original signal and helps training.
+
+    def __init__(self, dropout: float) -> None:
+        super().__init__()
+        self.dropout = nn.Dropout (dropout)
+        self.norm = LayerNormalization()
+
+    def forward (self, x, sub_layer):
+        # sub_layer is a FUNCTION we get passed (an attention lambda, or the feed-forward block)
+        # pre-norm: normalize first, run the sublayer, dropout, then add the original x back
+        return x + self.dropout(sub_layer(self.norm(x)))
+
+class EncoderBlock (nn.Module):
+    # One encoder layer = attention ("the meeting") + feed-forward ("desk time"),
+    # each wrapped in a residual connection. The full Encoder stacks N = 6 of these.
+    def __init__(self, self_attention_block: MultiHeadAttentionBlock, feed_forward_block: FeedForwardBlock, dropout: float)-> None:
+        super().__init__()                                  # set up nn.Module first
+        self.self_attention_block = self_attention_block    # words look at each other
+        self.feed_forward_block = feed_forward_block        # each word thinks on its own
+        # 2 residual connections: [0] wraps attention, [1] wraps feed-forward
+        # (_ means we don't need the loop number, we just want 2 copies)
+        self.residual_connections = nn.ModuleList([ResidualConnection(dropout) for _ in range(2)])
+
+    def forward(self, x, src_mask):
+        # x: (Batch, Seq_len, d_model)
+        # 1. self-attention: q, k and v are all x, so the sentence attends to itself.
+        #    The residual connection wants a function of one input, so the lambda
+        #    takes x and fills in the other three arguments (x, x, src_mask).
+        #    src_mask makes sure no word looks at [PAD] tokens.
+        x = self.residual_connections[0](x, lambda x: self.self_attention_block(x, x, x, src_mask))
+        # 2. feed-forward: takes one input already, so pass the block directly
+        x = self.residual_connections[1](x, self.feed_forward_block)
+        return x    # (Batch, Seq_len, d_model): same shape in and out, so blocks can be stacked
+
+class Encoder (nn.Module):
+    # Step 7: the full encoder = N EncoderBlocks in a row + one final LayerNorm.
+
+    def __init__(self, layers: nn.ModuleList) -> None:
+        super().__init__()
+        self.layers = layers                # nn.ModuleList of N EncoderBlocks
+        self.norm = LayerNormalization ()   # final clean-up (needed because we use pre-norm)
+
+    def forward(self, x, mask):
+        # x: (Batch, Seq_len, d_model) --> same shape
+        for layer in self.layers:
+            x = layer (x, mask)             # each block refines x a bit more
+        return self.norm(x)
+
+
