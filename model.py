@@ -215,3 +215,48 @@ class Encoder (nn.Module):
         return self.norm(x)
 
 
+class DecoderBlock(nn.Module):
+    # Step 8: one decoder layer. Like an EncoderBlock with one extra step in the middle:
+    #   1. masked self-attention: the target sentence looks at itself, but only at earlier words
+    #   2. cross-attention: the target looks at the encoder's output (the source sentence)
+    #   3. feed-forward: each token thinks on its own
+    # Each step is wrapped in its own residual connection, so we need 3 of them.
+
+    def __init__(self, self_attention_block: MultiHeadAttentionBlock, cross_attention_block: MultiHeadAttentionBlock, feed_forward_block: FeedForwardBlock, dropout: float)-> None:
+        super().__init__()
+        self.self_attention_block = self_attention_block    # target looks at target
+        self.cross_attention_block = cross_attention_block  # target looks at source
+        self.feed_forward_block = feed_forward_block
+        # nn.ModuleList (not nn.Module) holding 3 ResidualConnections: [0] self-attn, [1] cross-attn, [2] feed-forward
+        self.residual_connections = nn.ModuleList([ResidualConnection(dropout) for _ in range(3)])
+        self.dropout = nn.Dropout(dropout)  # not used in forward: each ResidualConnection has its own dropout
+
+    def forward(self, x, encoder_output, src_mask, tgt_mask):
+        # x: the target so far, (Batch, tgt_seq_len, d_model)
+        # encoder_output: (Batch, src_seq_len, d_model)
+        # src_mask hides [PAD] in the source; tgt_mask hides future words (and [PAD]) in the target
+        # 1. masked self-attention: q, k, v all come from the target. tgt_mask stops each word
+        #    from peeking at the words after it (those are what it has to predict!)
+        x = self.residual_connections[0](x, lambda x: self.self_attention_block(x, x, x, tgt_mask ))
+        # 2. cross-attention: Query from the target (x), Key and Value from the encoder output.
+        #    "Which words of the source sentence help me with this target word?"
+        x = self.residual_connections[1](x, lambda x: self.cross_attention_block(x, encoder_output, encoder_output, src_mask))
+        # 3. feed-forward: takes one input, so pass the block directly
+        x = self.residual_connections[2](x, self.feed_forward_block)
+        return x    # (Batch, tgt_seq_len, d_model)
+
+class Decoder(nn.Module):
+    # The full decoder = N DecoderBlocks in a row + one final LayerNorm.
+    # Every block gets the same encoder_output.
+
+    def __init__(self, layers: nn.ModuleList) -> None:
+        super().__init__()
+        self.layers = layers                # nn.ModuleList of N DecoderBlocks
+        self.norm = LayerNormalization()    # final clean-up (pre-norm, same as the Encoder)
+
+    def forward(self, x, encoder_output, src_mask, tgt_mask):
+        # x: (Batch, tgt_seq_len, d_model) --> same shape
+        for layer in self.layers:
+            x= layer (x, encoder_output, src_mask, tgt_mask)
+        return self.norm(x)
+
