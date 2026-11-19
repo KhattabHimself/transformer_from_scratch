@@ -14,6 +14,10 @@ An English to Italian translator built on the Transformer from "Attention Is All
 | `translate.py` | Translates a sentence with a trained checkpoint |
 | `attention_visual.ipynb` | Draws what each attention head looks at |
 
+## Tutorials
+
+`transformer_tutorial/` has three step-by-step notebooks in TensorFlow Keras that build up to a Transformer: self-attention from scratch in NumPy, a Transformer encoder for sequences, and an encoder-decoder that translates dates. See its README for details.
+
 ## Run it
 
 ```bash
